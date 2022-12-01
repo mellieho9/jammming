@@ -13,11 +13,11 @@ const fs = require("fs"),
     path = require("path"),
     ConfigOps = require("./config-ops"),
     validator = require("./config-validator"),
+    pathUtil = require("../util/path-util"),
     ModuleResolver = require("../util/module-resolver"),
-    naming = require("../util/naming"),
     pathIsInside = require("path-is-inside"),
     stripComments = require("strip-json-comments"),
-    stringify = require("json-stable-stringify-without-jsonify"),
+    stringify = require("json-stable-stringify"),
     requireUncached = require("require-uncached");
 
 const debug = require("debug")("eslint:config-file");
@@ -29,7 +29,7 @@ const debug = require("debug")("eslint:config-file");
 /**
  * Determines sort order for object keys for json-stable-stringify
  *
- * see: https://github.com/samn/json-stable-stringify#cmp
+ * see: https://github.com/substack/json-stable-stringify#cmp
  *
  * @param   {Object} a The first comparison object ({key: akey, value: avalue})
  * @param   {Object} b The second comparison object ({key: bkey, value: bvalue})
@@ -115,11 +115,6 @@ function loadJSONConfigFile(filePath) {
     } catch (e) {
         debug(`Error reading JSON file: ${filePath}`);
         e.message = `Cannot read config file: ${filePath}\nError: ${e.message}`;
-        e.messageTemplate = "failed-to-read-json";
-        e.messageData = {
-            path: filePath,
-            message: e.message
-        };
         throw e;
     }
 }
@@ -405,29 +400,25 @@ function applyExtends(config, configContext, filePath, relativeTo) {
     }
 
     // Make the last element in an array take the highest precedence
-    return configExtends.reduceRight((previousValue, parentPath) => {
+    config = configExtends.reduceRight((previousValue, parentPath) => {
         try {
-            let extensionPath;
-
             if (parentPath.startsWith("eslint:")) {
-                extensionPath = getEslintCoreConfigPath(parentPath);
+                parentPath = getEslintCoreConfigPath(parentPath);
             } else if (isFilePath(parentPath)) {
 
                 /*
                  * If the `extends` path is relative, use the directory of the current configuration
                  * file as the reference point. Otherwise, use as-is.
                  */
-                extensionPath = (path.isAbsolute(parentPath)
+                parentPath = (path.isAbsolute(parentPath)
                     ? parentPath
                     : path.join(relativeTo || path.dirname(filePath), parentPath)
                 );
-            } else {
-                extensionPath = parentPath;
             }
-            debug(`Loading ${extensionPath}`);
+            debug(`Loading ${parentPath}`);
 
             // eslint-disable-next-line no-use-before-define
-            return ConfigOps.merge(load(extensionPath, configContext, relativeTo), previousValue);
+            return ConfigOps.merge(load(parentPath, configContext, relativeTo), previousValue);
         } catch (e) {
 
             /*
@@ -441,6 +432,52 @@ function applyExtends(config, configContext, filePath, relativeTo) {
         }
 
     }, config);
+
+    return config;
+}
+
+/**
+ * Brings package name to correct format based on prefix
+ * @param {string} name The name of the package.
+ * @param {string} prefix Can be either "eslint-plugin" or "eslint-config
+ * @returns {string} Normalized name of the package
+ * @private
+ */
+function normalizePackageName(name, prefix) {
+
+    /*
+     * On Windows, name can come in with Windows slashes instead of Unix slashes.
+     * Normalize to Unix first to avoid errors later on.
+     * https://github.com/eslint/eslint/issues/5644
+     */
+    if (name.indexOf("\\") > -1) {
+        name = pathUtil.convertPathToPosix(name);
+    }
+
+    if (name.charAt(0) === "@") {
+
+        /*
+         * it's a scoped package
+         * package name is "eslint-config", or just a username
+         */
+        const scopedPackageShortcutRegex = new RegExp(`^(@[^/]+)(?:/(?:${prefix})?)?$`),
+            scopedPackageNameRegex = new RegExp(`^${prefix}(-|$)`);
+
+        if (scopedPackageShortcutRegex.test(name)) {
+            name = name.replace(scopedPackageShortcutRegex, `$1/${prefix}`);
+        } else if (!scopedPackageNameRegex.test(name.split("/")[1])) {
+
+            /*
+             * for scoped packages, insert the eslint-config after the first / unless
+             * the path is already @scope/eslint or @scope/eslint-config-xxx
+             */
+            name = name.replace(/^@([^/]+)\/(.*)$/, `@$1/${prefix}-$2`);
+        }
+    } else if (name.indexOf(`${prefix}-`) !== 0) {
+        name = `${prefix}-${name}`;
+    }
+
+    return name;
 }
 
 /**
@@ -468,22 +505,15 @@ function resolve(filePath, relativeTo) {
         const pluginName = filePath.slice(7, filePath.lastIndexOf("/"));
         const configName = filePath.slice(filePath.lastIndexOf("/") + 1);
 
-        normalizedPackageName = naming.normalizePackageName(pluginName, "eslint-plugin");
+        normalizedPackageName = normalizePackageName(pluginName, "eslint-plugin");
         debug(`Attempting to resolve ${normalizedPackageName}`);
-
-        return {
-            filePath: require.resolve(normalizedPackageName),
-            configName,
-            configFullName
-        };
+        filePath = resolver.resolve(normalizedPackageName, getLookupPath(relativeTo));
+        return { filePath, configName, configFullName };
     }
-    normalizedPackageName = naming.normalizePackageName(filePath, "eslint-config");
+    normalizedPackageName = normalizePackageName(filePath, "eslint-config");
     debug(`Attempting to resolve ${normalizedPackageName}`);
-
-    return {
-        filePath: resolver.resolve(normalizedPackageName, getLookupPath(relativeTo)),
-        configFullName: filePath
-    };
+    filePath = resolver.resolve(normalizedPackageName, getLookupPath(relativeTo));
+    return { filePath, configFullName: filePath };
 
 
 }
@@ -515,10 +545,8 @@ function loadFromDisk(resolvedPath, configContext) {
             }
         }
 
-        const ruleMap = configContext.linterContext.getRules();
-
         // validate the configuration before continuing
-        validator.validate(config, resolvedPath.configFullName, ruleMap.get.bind(ruleMap), configContext.linterContext.environments);
+        validator.validate(config, resolvedPath.configFullName, configContext.linterContext.rules, configContext.linterContext.environments);
 
         /*
          * If an `extends` property is defined, it represents a configuration file to use as
@@ -572,22 +600,6 @@ function load(filePath, configContext, relativeTo) {
     return config;
 }
 
-/**
- * Checks whether the given filename points to a file
- * @param {string} filename A path to a file
- * @returns {boolean} `true` if a file exists at the given location
- */
-function isExistingFile(filename) {
-    try {
-        return fs.statSync(filename).isFile();
-    } catch (err) {
-        if (err.code === "ENOENT") {
-            return false;
-        }
-        throw err;
-    }
-}
-
 
 //------------------------------------------------------------------------------
 // Public Interface
@@ -602,6 +614,7 @@ module.exports = {
     resolve,
     write,
     applyExtends,
+    normalizePackageName,
     CONFIG_FILES,
 
     /**
@@ -612,6 +625,14 @@ module.exports = {
      *      or null if there is no configuration file in the directory.
      */
     getFilenameForDirectory(directory) {
-        return CONFIG_FILES.map(filename => path.join(directory, filename)).find(isExistingFile) || null;
+        for (let i = 0, len = CONFIG_FILES.length; i < len; i++) {
+            const filename = path.join(directory, CONFIG_FILES[i]);
+
+            if (fs.existsSync(filename) && fs.statSync(filename).isFile()) {
+                return filename;
+            }
+        }
+
+        return null;
     }
 };

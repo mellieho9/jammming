@@ -13,8 +13,7 @@ module.exports = {
         docs: {
             description: "disallow the use of `undefined` as an identifier",
             category: "Variables",
-            recommended: false,
-            url: "https://eslint.org/docs/rules/no-undefined"
+            recommended: false
         },
 
         schema: []
@@ -68,7 +67,7 @@ module.exports = {
                 while (stack.length) {
                     const scope = stack.pop();
 
-                    stack.push(...scope.childScopes);
+                    stack.push.apply(stack, scope.childScopes);
                     checkScope(scope);
                 }
             }

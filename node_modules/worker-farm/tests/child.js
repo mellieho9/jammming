@@ -13,11 +13,9 @@ module.exports = function (timeout, callback) {
 
 
 module.exports.args = function (callback) {
-  callback(null, {
-      argv     : process.argv
-    , cwd      : process.cwd()
-    , execArgv : process.execArgv
-  })
+  console.log(process.argv)
+  console.log(process.execArgv)
+  callback()
 }
 
 

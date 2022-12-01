@@ -10,7 +10,7 @@
 //------------------------------------------------------------------------------
 
 /**
- * An event emitter
+ * An object describing an AST selector
  * @typedef {Object} SafeEmitter
  * @property {function(eventName: string, listenerFunc: Function): void} on Adds a listener for a given event name
  * @property {function(eventName: string, arg1?: any, arg2?: any, arg3?: any)} emit Emits an event with a given name.
@@ -27,6 +27,8 @@
  * another module throws an error or registers a listener.
  * 2. It calls listener functions without any `this` value. (`EventEmitter` calls listeners with a
  * `this` value of the emitter instance, which would give listeners access to other listeners.)
+ * 3. Events can be emitted with at most 3 arguments. (For example: when using `emitter.emit('foo', a, b, c)`,
+ * the arguments `a`, `b`, and `c` will be passed to the listener functions.)
  * @returns {SafeEmitter} An emitter
  */
 module.exports = () => {
@@ -40,9 +42,9 @@ module.exports = () => {
                 listeners[eventName] = [listener];
             }
         },
-        emit(eventName, ...args) {
+        emit(eventName, a, b, c) {
             if (eventName in listeners) {
-                listeners[eventName].forEach(listener => listener(...args));
+                listeners[eventName].forEach(listener => listener(a, b, c));
             }
         },
         eventNames() {
